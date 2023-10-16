@@ -7,10 +7,10 @@ use walkdir::WalkDir;
 
 #[derive(Clone)]
 pub struct FnDef {
-    file: String,
-    parent: Option<String>, // name of struct or enum
+    pub file: String,
+    pub parent: Option<String>, // name of struct or enum
     pub name: String,
-    calls: Vec<String>,
+    pub calls: Vec<String>,
 }
 
 impl FnDef {
@@ -24,12 +24,7 @@ impl FnDef {
     }
     
     pub fn to_string(&self, include: &Vec<String>) -> String {
-        let locale = if let Some(parent) = &self.parent {
-            format!("{}::{}", self.file, parent)
-        } else {
-            self.file.clone()
-        };
-        let mut s = format!("{}<{}>\n", self.name, locale);
+        let mut s = format!("{}\n", self.name);
         for call in &self.calls {
             if !include.contains(call) {
                 continue;
@@ -40,7 +35,7 @@ impl FnDef {
         }
         s
     }
-
+    
 }
 
 pub struct CallsVisitor {
@@ -61,10 +56,15 @@ impl CallsVisitor {
     }
 
     fn start_new_fndef(&mut self, name: String) {
+        let full_name = if let Some(parent) = &self.current_parent {
+            format!("{}::{}", parent, name)
+        } else {
+            name
+        };
         self.current_function = Some(FnDef::new(
             self.current_file.clone(),
             self.current_parent.clone(),
-            name,
+            full_name,
         ));
     }
 
@@ -76,8 +76,15 @@ impl CallsVisitor {
 impl<'ast> Visit<'ast> for CallsVisitor {
     fn visit_expr_call(&mut self, expr: &'ast ExprCall) {
         if let Some(the_func) = &mut self.current_function {
-            let call_name = expr.func.to_token_stream().to_string() // TODO: is this sufficient?
-                .split_whitespace().last().unwrap().to_owned();
+            let token_string: String = expr.func.to_token_stream().to_string();
+            let tokens: Vec<String> = token_string.split_whitespace().map(String::from).collect();            
+            let call = &tokens[tokens.len()-1];
+            let call_name: String = tokens.join("");
+            // if the name is capitalized then it's probably an enum instance
+            // not a function call
+            if call.chars().next().unwrap().is_uppercase() {
+                return;
+            }
             if !the_func.calls.contains(&call_name) {
                 the_func.calls.push(call_name);
             }
@@ -87,8 +94,18 @@ impl<'ast> Visit<'ast> for CallsVisitor {
 
     fn visit_expr_method_call(&mut self, expr: &'ast ExprMethodCall) {
         if let Some(the_func) = &mut self.current_function {
-            let call_name = expr.method.to_string()
-                .split_whitespace().last().unwrap().to_owned();
+            let recv = expr.receiver.to_token_stream().to_string();
+            let qualif = if recv == "self" {
+                if let Some(parent) = &self.current_parent {
+                    parent
+                } else {
+                    panic!("should be a parent. recv: {}", recv);
+                }
+            } else {
+                "?"
+            };
+            let name = expr.method.to_string();
+            let call_name = format!("{}::{}", qualif, name);
             if !the_func.calls.contains(&call_name) {
                 the_func.calls.push(call_name);
             }
@@ -128,10 +145,11 @@ pub fn process_funcs_in_dir(dir_path: &str) -> Vec<FnDef> {
             // for the given rs file, make the syntax tree
             let file_path = entry.path();
             let content = std::fs::read_to_string(file_path).unwrap();
-            let syntax_tree: syn::File = syn::parse_str(&content).unwrap();
-            // find callers in the syntax tree
-            cv.current_file = file_path.file_name().unwrap().to_str().unwrap().to_string();
-            cv.visit_file(&syntax_tree);
+            if let Ok(syntax_tree) = syn::parse_str(&content) {
+                // find callers in the syntax tree
+                cv.current_file = file_path.file_name().unwrap().to_str().unwrap().to_string();
+                cv.visit_file(&syntax_tree);
+            }
         }
     }
     cv.functions
